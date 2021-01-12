@@ -9,7 +9,11 @@ from sklearn.model_selection import StratifiedKFold
 from sklearn.linear_model import LogisticRegression
 from goatools.base import download_ncbi_associations
 from goatools.anno.genetogo_reader import Gene2GoReader
+from sklearn.pipeline import make_pipeline
+from sklearn.preprocessing import StandardScaler
+from sklearn import preprocessing
 import utils
+
 
 import os
 
@@ -240,6 +244,7 @@ def merge_embedding_with_GO_labels(emb_df, GO_df):
 
 
 def perform_GOclass_eval(embedding_df,
+                         rnd_state,
                          index_type='gene_symbol',
                          min_GO_size=200,
                          max_GO_size=300,
@@ -278,9 +283,13 @@ def perform_GOclass_eval(embedding_df,
     X = merged_df.loc[:, merged_df.columns.str.startswith('emb_')]
     y = merged_df.loc[:, merged_df.columns.str.startswith('GO:')]
 
+    # ----
+
+   
+    # ----
 
     GO_SCORES = []
-    skf = StratifiedKFold(n_splits=n_splits)
+    skf = StratifiedKFold(n_splits=n_splits, shuffle = True, random_state=rnd_state)
 
 
     for GOlabel in y:
@@ -300,11 +309,17 @@ def perform_GOclass_eval(embedding_df,
         GO_group_size = len(go2geneIDs[GOlabel])
 
         for i, (train_idx, test_idx) in enumerate(skf.split(X, y_GO)):
-            model = LogisticRegression(penalty='none', n_jobs=n_jobs)
+
+            model = LogisticRegression(penalty='none', n_jobs=n_jobs, random_state=rnd_state, max_iter=500)
             X_train = X.iloc[train_idx, :]
             y_train = y_GO.iloc[train_idx]
             X_test = X.iloc[test_idx, :]
             y_test = y_GO.iloc[test_idx]
+
+
+
+            #model = make_pipeline(StandardScaler(), LogisticRegression(penalty='none', n_jobs=n_jobs))
+            #model.fit(X_train, y_train)  # apply scaling on training data
 
             model.fit(X_train, y_train)
 
@@ -352,23 +367,250 @@ def perform_GOclass_eval(embedding_df,
     return pd.DataFrame(GO_SCORES)
 
 
+def tmp_add_column(columns):
+    #path = "/Users/pegah_abed/Documents/human_brains_final_files/final/final_files_and_folders/cortex_study"
+    #path_to_embed = os.path.join(path,"plain_resnet/resnet50_embeddings_gene_level.csv" )
+
+    path = "/Users/pegah_abed/Documents/human_brains_final_files/final/final_files_and_folders/cortex_study/random"
+    path_to_embed = os.path.join(path, "random_all_training_embeddings_gene_level.csv")
+
+    gene_level_embed_df = pd.read_csv(path_to_embed)
+    print (list(gene_level_embed_df))
+
+    path_to_info = "/Users/pegah_abed/Documents/human_brains_final_files/final/final_files_and_folders/cortex_study/human_ISH_info.csv"
+    images_info = pd.read_csv(path_to_info)
+
+
+    avail_cols = ['gene_symbol']
+    for col in columns:
+        if col not in list(images_info):
+            print("column {} does not exist in image info file.".format(col))
+        else:
+            avail_cols.append(col)
+
+    images_info = images_info[avail_cols]
+    new_gene_level_embed_df = gene_level_embed_df.merge(images_info, how="left", on='gene_symbol')
+    new_gene_level_embed_df = new_gene_level_embed_df.drop_duplicates(subset=['gene_symbol'])
+
+    number_of_new_columns = len(avail_cols) - 1
+    columns = list(new_gene_level_embed_df)
+    columns = [columns[0]] + columns[(-1 * number_of_new_columns):] + columns[1:(-1 * number_of_new_columns)]
+
+    new_image_level_embed_df = new_gene_level_embed_df[columns]
+    new_image_level_embed_name = "random_all_training_embeddings_gene_level" + "_with_info.csv"
+    new_image_level_embed_df_path = os.path.join(path, new_image_level_embed_name)
+
+    new_image_level_embed_df.to_csv(new_image_level_embed_df_path, index=None)
+
+
+def tmp_convert_to_gene_level():
+    path = "/Users/pegah_abed/Documents/human_brains_final_files/final/final_files_and_folders/cortex_study/random"
+    path_to_embed = os.path.join(path, "random_all_training_embeddings_image_level.csv")
+
+    embeddings_file = pd.read_csv(path_to_embed)
+    embeddings_file = embeddings_file.rename(columns={'id': 'image_id'})
+    print (embeddings_file.head())
+
+    path_to_info = "/Users/pegah_abed/Documents/human_brains_final_files/final/final_files_and_folders/cortex_study/human_ISH_info.csv"
+    images_info = pd.read_csv(path_to_info)
+
+
+    # perform left merge on the two dataframes to add gene_symbol to the embeddings.csv
+    merged_df = embeddings_file.merge(images_info[["image_id", "gene_symbol"]], how="left", on="image_id")
+
+    # reorder the dataframe columns
+    merged_columns = list(merged_df)
+    merged_columns = [merged_columns[0]] + [merged_columns[-1]] + merged_columns[1:-1]
+    merged_df = merged_df[merged_columns]
+
+    # drop the image_id column
+    merged_df = merged_df.drop(columns=["image_id"])
+
+    # group by gene_symbol and average over the embedding values
+    grouped_df = merged_df.groupby(['gene_symbol']).mean()
+
+    print(grouped_df.head())
+
+    print("the number of genes is: {}".format(len(grouped_df)))
+
+    # and then I want to save this file as gene_embddings in the same folder.
+    item_name =  "random_all_training_embeddings_gene_level.csv"
+    save_to_path = os.path.join(path, item_name)
+    grouped_df.to_csv(save_to_path)
+
+
+def get_patches_that_activate_neuron_the_most_and_the_least(ts, top_go_term, path_to_labels_file, path_to_gene_level_embeddings,
+                                                            path_to_patch_level_embeddings):
+    """
+    First, get the donor level embeddings of the top gene (embeddings of the images that assay the top gene, aggregated to donor-level).
+    This files is used as the data to get feature importance.
+
+    Standardize the embeddings.
+
+    Then, identify the most important feature by comparing the coefficients for a logistic regression model that has been mapped to the data.
+    Next, for all the patches that assay the top gene, see which 2 patches have the highest value and which 2 patches have the lowest values
+    for that features
+
+    :param ts: str. Timestamp to indicate which set of embeddings to use.
+    :param top_gene: str. The gene with the highest AUC score from the logistic regression binary classifier that predicts case vs control
+    :param path_to_labels_file: str. Path to the labels csv file. Labels are True/False (case/control) on a donor level.
+    :param path_to_patch_level_embeddings: str. Path to the patch level sz embeddings
+    :return: None
+    """
+    path_to_per_gene_per_donor_file = os.path.join(sz_general_path, "per_gene_per_donor",
+                                                   ts + "_embed_per_gene_per_donor", top_gene + ".csv")
+    max_feature, max_score = feature_importance_with_lr(path_to_gene_level_embeddings, path_to_labels_file,
+                                                        standardize=False)
+
+    print('MAX')
+    print(max_feature)
+    path_to_info_file = os.path.join(sz_general_path, "human_ISH_info.csv")
+    get_feature_value_from_patch_level(path_to_info_file, path_to_patch_level_embeddings, top_gene, max_feature)
+
+
+def feature_importance_with_lr(path_to_embed_file, path_to_labels_file, standardize):
+    if standardize == False:
+        embed_df = pd.read_csv(path_to_embed_file)
+
+    else:
+        embed_df = pd.read_csv(path_to_embed_file)
+        donor_id_col = embed_df['donor_id']
+        embed_df = embed_df.drop(columns=['donor_id'])
+        embed_df = embed_df.apply(lambda x: (x - x.mean()) / (x.std()), axis=1)
+        embed_df['donor_id'] = donor_id_col
+
+    label_df = pd.read_csv(path_to_labels_file)
+
+    label_df = label_df.rename(columns={'ID': 'donor_id'})
+    print(embed_df.head())
+    print(label_df.head())
+
+    left = embed_df
+    right = label_df
+
+    label_df = pd.merge(left, right, how='left', on='donor_id')[['donor_id', 'disease_diagnosis']]
+
+    embed_df = embed_df.drop(columns=['donor_id'])
+    label_df = label_df.drop(columns=['donor_id'])
+
+    X = embed_df
+    Y = label_df
+
+    print(embed_df.head())
+    print(label_df.head())
+
+    model = LogisticRegression()
+    # fit the model
+    model.fit(X, Y)
+    # get importance
+    importance = model.coef_[0]
+    # summarize feature importance
+
+    max_score = math.inf * -1
+    max_feature = None
+
+    for i, v in enumerate(importance):
+        print('Feature: {}, Score: {}'.format(i, abs(v)))
+        if abs(v) > max_score:
+            max_score = abs(v)
+            max_feature = i
+
+    print("----")
+    print("Max:", max_feature, max_score)
+
+    return (max_feature, max_score)
+
+def create_gene_donor_one_hot_encoded_csv_file(path_to_info, path_to_save):
+
+    info_df = pd.read_csv(path_to_info)
+
+
+
+    genes= info_df['gene_symbol'].unique()
+    donors = info_df['donor_id'].unique()
+
+    print ("Number of unique genes: ", len(genes))
+    print ("Number of unique donors: ", len(donors))
+
+    tmp = np.zeros(dtype =int , shape=(len(genes), len(donors)))
+    gene_donor_df = pd.DataFrame(tmp, index=genes, columns=donors)
+    gene_donor_df.index.name = 'gene_symbol'
+    print (gene_donor_df.head())
+
+
+
+    gene_donor_map = {}
+
+    group_by_gene = info_df.groupby('gene_symbol')
+    for key, item in group_by_gene:
+        gene_donor_map[key] = item['donor_id'].unique()
+
+
+    for gene in gene_donor_map:
+        for donor in gene_donor_map[gene]:
+            gene_donor_df.loc[gene, donor] = 1
+
+    print(gene_donor_df.head())
+
+    # -------  add entrez_id ------
+
+    gene_entrez_df = info_df[['gene_symbol', 'entrez_id']].drop_duplicates()
+    gene_donor_df = gene_donor_df.merge(gene_entrez_df, how="left", on="gene_symbol")
+    print (gene_donor_df.head())
+
+    path_to_save = os.path.join(path_to_save, "cortex_gene_donor_one_hot_coded.csv")
+    gene_donor_df.to_csv(path_to_save)
+    return gene_donor_df
+
+
+
+
+
 
 if __name__ == "__main__":
+    general_path = "/Users/pegah_abed/Documents/old_Human_ISH/cortex"
 
-    """
+    path_to_info = os.path.join(general_path, "human_ISH_info.csv")
+    path_to_save =  "/Users/pegah_abed/Documents/old_Human_ISH/after_segmentation/dummy_4/sz"
+    gene_donor_one_hot_coded_df = create_gene_donor_one_hot_encoded_csv_file(path_to_info, path_to_save)
+
+
+
+    #tmp_convert_to_gene_level()
+
+
+
+    columns = ['entrez_id']
+    #tmp_add_column(columns)
+
+
+
     general_path = "/Users/pegah_abed/Documents/old_Human_ISH/after_segmentation/dummy_3"
 
-    ts_list = ["1603427490", "1603427156"]
+    ts_list = ["1603427156"] #["1603427490", "1603427156"]
     for ts in ts_list:
-        embed_file_name = ts + "_triplet_no_sz_all_training_embeddings_gene_level_with_info.csv"
-        path_to_embed = os.path.join(general_path, ts, embed_file_name)
-        embed_df = pd.read_csv(path_to_embed)
+        embed_file_name = ts + "_triplet_all_training_embeddings_gene_level_with_info.csv"
+        #path_to_embed = os.path.join(general_path, ts, embed_file_name)
+        #path_to_embed = "/Users/pegah_abed/Documents/human_brains_final_files/final/final_files_and_folders/cortex_study/" \
+         #               "plain_resnet/resnet50_embeddings_gene_level_with_info.csv"
+
+        #path_to_embed = "/Users/pegah_abed/Documents/human_brains_final_files/final/final_files_and_folders/cortex_study/" \
+          #             "random/random_all_training_embeddings_gene_level_with_info.csv"
+
+
+        #embed_df = pd.read_csv(path_to_embed)
+
+        embed_df =  gene_donor_one_hot_coded_df
+
+        print(list(embed_df))
 
 
 
         min_GO_size = 40
         max_GO_size = 200
+        rnd_state = 1
         go_scores = perform_GOclass_eval(embed_df,
+                             rnd_state,
                              index_type='gene_symbol',
                              min_GO_size=min_GO_size,
                              max_GO_size=max_GO_size,
@@ -381,9 +623,25 @@ if __name__ == "__main__":
         print (len(go_scores))
         print (np.mean(go_scores['AUC']))
         print ("*"*50)
-        #go_scores.to_csv(os.path.join(general_path, ts, ts +"_new_go_scores_" + str(min_GO_size) + "_" + str(max_GO_size) + ".csv"))
-        
-        """
+
+
+        save_to_path = os.path.join("/Users/pegah_abed/Documents/old_Human_ISH/after_segmentation/dummy_4", "sz")
+
+        #go_scores.to_csv(os.path.join(save_to_path, ts +"_avg_across_folds_go_scores_" + str(min_GO_size) + "_"
+                                     # + str(max_GO_size) +  "_rand_state_" + str(rnd_state) +".csv"))
+
+        #go_scores.to_csv(os.path.join(save_to_path, ts + "_avg_across_folds_go_scores_resnet_" +
+         #              str(min_GO_size) + "_" + str(max_GO_size) +  "_rand_state_" + str(rnd_state) +".csv"))
+
+       # go_scores.to_csv(os.path.join(save_to_path, ts + "_avg_across_folds_go_scores_random_" +
+       #               str(min_GO_size) + "_" + str(max_GO_size) +  "_rand_state_" + str(rnd_state) +".csv"))
+
+        go_scores.to_csv(os.path.join(save_to_path, ts +"_avg_across_folds_go_scores_gene_donor_one_hot_coded_" + str(min_GO_size) + "_"
+         + str(max_GO_size) +  "_rand_state_" + str(rnd_state) +".csv"))
+
+
+
+
         
 
         
